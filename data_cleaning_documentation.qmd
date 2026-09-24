@@ -86,3 +86,40 @@ editor: visual
 **Output**
 
 - Saved `wd_sales_clean.csv`, plus `.rds` to keep column types.
+
+### **Members Cleaning**
+
+**IDs and contact fields** 	
+
+Standardized:
+- emails 
+- cities
+- countries
+- ZIP codes
+- Phone numbers
+
+**Dates and Age**
+
+- Parsed signup and cancellation dates
+- Created dated events
+- Derived age from birth dates.
+
+**Customers and Clubs**	
+
+- Added: 
+- customer_key
+- internal and guest account flags
+- Black/White club_tier
+
+**Duplicates**
+
+- Removed exact duplicate row
+- Customers appearing in both snapshots kept
+
+**Club Changes**	
+
+Classified: 
+- 176 upgrades
+- 59 downgrades
+- 487 other club changes
+-All separated from cancellations
