@@ -1,0 +1,88 @@
+---
+title: "Data Cleaning Documentation"
+author: "Carly Clay Jake Amy"
+format: html
+editor: visual
+---
+
+### **Sales Data Cleaning**
+
+**Reading and combining**
+
+- Read ZIP code, phone, SKU, name, address, company, notes, birth-date, and wholesale-number columns as text, so ZIP codes keep leading zeros and the three files combine without type clashes
+
+- Stacked the three files, added `source_file`, and removed exact duplicate rows, including any repeated across files
+
+- Cached the Excel reads to an `.rds` for speed
+
+**Rows removed**
+
+- Empty refund-header rows (no product, no quantity, \$0).
+
+**Dates**
+
+- Combined the separate date and time columns into one `submitted_at` timestamp; added `order_date`.
+
+- Set placeholder birth dates (06/21/1805, Jan 1 dates like 1970-01-01) and birth dates under age 21 to NA; added `bill_age_at_order`.
+
+**Contact fields**
+
+- ZIP codes: padded to 5 digits, cut ZIP+4 to 5, kept Canadian postal codes.
+
+- Phones: reduced to 10 digits.
+
+- Emails: lowercased and trimmed.
+
+- Cities: title-cased, trailing commas removed.
+
+- Added `bill_country` and `ship_country` (US/CA).
+
+**Customers**
+
+- Created `customer_key` (customer number, or email when the number is missing).
+
+- Flagged house accounts (breakage, event marketing, employee samples, \@lawestatewines.com, Law Estate Wines company) as `is_internal`.
+
+- Flagged walk-in accounts ("Guest Customer", "POS Guest") as `is_guest_account`.
+
+- Neither kind of account gets a `customer_key`.
+
+- Added `club_tier` (Black/White Label) from the messy `club` labels.
+
+**Sales associates**
+
+- Fixed typos ("Teresa Able", "Kelli law") and "Pedro" → "Pedro Vasquez".
+
+- Shared credit ("Addie/Mariah") → "Multiple".
+
+**Products**
+
+- Replaced the unreliable `Product Type` with `item_category`: wine, tasting, club_admin, event, promo_gift, shipping_packaging, lodging, wine_set, food, glass_pour, merch, other.
+
+- Parsed `wine_name`, `vintage`, and `bottle_format` (750ml/1.5L).
+
+- Built a standard `product_std` name (e.g. "2013 Audacious Magnum"), merging variants like "Audacious 2013" and "SOLD OUT".
+
+- Added `tasting_waived`.
+
+**Flags**
+
+- `is_refund`: refund transaction type, original order number present, or negative quantity.
+
+- `is_comp`: samples, donations, replacements, corked bottles, employee purchases.
+
+**Columns dropped**
+
+- Empty or single-value: order source, inventory pool, brand, reorder SKU, promotion, wholesale number, picked-up-by.
+
+- Redundant: transaction type, department, product type, pickup location, completed time, birth dates.
+
+- Unreliable: cost of goods (zero on almost every line).
+
+- Fulfillment logistics: tracking, shipping and fulfillment dates, weight, handling, tax flags, last modified date.
+
+- Free text: order notes, gift messages.
+
+**Output**
+
+- Saved `wd_sales_clean.csv`, plus `.rds` to keep column types.
