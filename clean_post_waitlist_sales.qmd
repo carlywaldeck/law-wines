@@ -11,27 +11,33 @@ format:
 execute:
   warning: false
   message: false
+editor: 
+  markdown: 
+    wrap: 72
 ---
 
 ## Overview
 
-This cleans the post-waitlist sales export and writes `post_waitlist_sales_clean.csv` (and `.rds`),
-**one row per line item**, using the same rules and column names as `wd_sales_clean`, so the two
+This cleans the post-waitlist sales export and writes
+`post_waitlist_sales_clean.csv` (and `.rds`), **one row per line item**,
+using the same rules and column names as `wd_sales_clean`, so the two
 can be stacked into one 2013–2025 table.
 
-This export has fewer fields than the WD files, so some WD columns don't exist here:
-no order time, taxes, order total, original/unit price, ship-to address, phone, birth date,
-original order number, or club tier.
+This export has fewer fields than the WD files, so some WD columns don't
+exist here: no order time, taxes, order total, original/unit price,
+ship-to address, phone, birth date, original order number, or club tier.
 
-::: {.callout-note}
-**Coverage:** starts 2022-08-01, where the WD data effectively ends (the last WD file has only
-2 rows after 2022-07-31). **Order numbers restart at 1011 in October 2025**, so they collide with
-2013 WD order numbers. When stacking, identify orders by `order_number` + dataset, not
+::: callout-note
+**Coverage:** starts 2022-08-01, where the WD data effectively ends (the
+last WD file has only 2 rows after 2022-07-31). **Order numbers restart
+at 1011 in October 2025**, so they collide with 2013 WD order numbers.
+When stacking, identify orders by `order_number` + dataset, not
 `order_number` alone.
 :::
 
-::: {.callout-warning}
-The output contains customer PII. Keep `post_waitlist_sales_clean.csv` / `.rds` in `.gitignore`.
+::: callout-warning
+The output contains customer PII. Keep `post_waitlist_sales_clean.csv` /
+`.rds` in `.gitignore`.
 :::
 
 ## Setup
@@ -48,12 +54,13 @@ library(here)
 
 ## Read
 
-Reads every `Sales Post Waitlist ... .csv` in the project root (works whether the export is one
-file or split into parts), all columns as text. Types are parsed explicitly below.
+Reads every `Sales Post Waitlist ... .csv` in the project root (works
+whether the export is one file or split into parts), all columns as
+text. Types are parsed explicitly below.
 
 ```{r}
 #| label: read
-paths <- list.files(here(), pattern = "^Sales Post Waitlist.*\\.csv$", full.names = TRUE)
+paths <- list.files(here("raw-data"), pattern = "^Sales Post Waitlist.*\\.csv$", full.names = TRUE)
 stopifnot(length(paths) >= 1)
 basename(paths)
 
@@ -71,8 +78,8 @@ dim(raw)
 
 ### De-duplicate
 
-97 rows are exact duplicates, with whole orders repeated line for line (an export artifact).
-`source_file` is ignored for the comparison.
+97 rows are exact duplicates, with whole orders repeated line for line
+(an export artifact). `source_file` is ignored for the comparison.
 
 ```{r}
 #| label: dedupe
@@ -82,11 +89,13 @@ nrow(raw)
 
 ## Helpers
 
-- **Money** comes as text: `"$1,234.00 "`, `"($88.00)"` for negatives, or a bare `"87"`.
-- **Postal codes:** US zips padded to 5 digits and ZIP+4 truncated; Canadian and other
-  international codes kept as-is.
-- **States:** full names ("California") converted to codes; international regions
-  ("Hong Kong", "Antwerp", "Dubai") get `bill_country = "Other"` and no state code.
+- **Money** comes as text: `"$1,234.00 "`, `"($88.00)"` for negatives,
+  or a bare `"87"`.
+- **Postal codes:** US zips padded to 5 digits and ZIP+4 truncated;
+  Canadian and other international codes kept as-is.
+- **States:** full names ("California") converted to codes;
+  international regions ("Hong Kong", "Antwerp", "Dubai") get
+  `bill_country = "Other"` and no state code.
 
 ```{r}
 #| label: helpers
@@ -134,16 +143,18 @@ year_rx <- "(?<!\\d)20[0-2]\\d(?!\\d)"   # also matches "2021Beguiling" (no spac
 
 ## Row-level cleaning
 
-- Drops 1,039 empty rows (no product, no quantity, $0).
-- Parses dates, quantities, and money; negative quantity or price = refund.
+- Drops 1,039 empty rows (no product, no quantity, \$0).
+- Parses dates, quantities, and money; negative quantity or price =
+  refund.
 - Fixes "Repeatcustomer" → "RepeatCustomer".
 - Standardizes emails, cities, states, zips; adds `bill_country`.
-- Sets zip **94111** to `NA` unless the city is San Francisco. It's the POS default for walk-ins
-  (about 1,000 rows, mostly with no city or state).
-- Sales associates: shared credit ("Addie/Renee", "Renee and Nicole D.") → "Multiple";
-  first-name-only and spelling variants fixed.
-- Flags house accounts (`is_internal`) and walk-in guest accounts (`is_guest_account`);
-  neither gets a `customer_key`.
+- Sets zip **94111** to `NA` unless the city is San Francisco. It's the
+  POS default for walk-ins (about 1,000 rows, mostly with no city or
+  state).
+- Sales associates: shared credit ("Addie/Renee", "Renee and Nicole D.")
+  → "Multiple"; first-name-only and spelling variants fixed.
+- Flags house accounts (`is_internal`) and walk-in guest accounts
+  (`is_guest_account`); neither gets a `customer_key`.
 
 ```{r}
 #| label: clean-rows
@@ -210,12 +221,14 @@ lines <- raw |>
 
 ## Product standardization
 
-Same categories as the WD cleaning, plus `adjustment` (tip adjustments, a wholesale partial
-payment). New in this export: 3L bottles, "Magnum" written before the vintage, names without a
-space ("2021Beguiling"), Cabernet Sauvignon as a regular wine, and many dated event tickets.
+Same categories as the WD cleaning, plus `adjustment` (tip adjustments,
+a wholesale partial payment). New in this export: 3L bottles, "Magnum"
+written before the vintage, names without a space ("2021Beguiling"),
+Cabernet Sauvignon as a regular wine, and many dated event tickets.
 
-The first matching rule wins. Events come before tasting so "Winemaker Tasting … Ticket" counts
-as an event, and shipping comes before wine sets so "Ship box- 12pack" counts as shipping.
+The first matching rule wins. Events come before tasting so "Winemaker
+Tasting … Ticket" counts as an event, and shipping comes before wine
+sets so "Ship box- 12pack" counts as shipping.
 
 ```{r}
 #| label: products
@@ -280,11 +293,12 @@ lines <- lines |>
 
 ## Final table
 
-Same column names and order as `wd_sales_clean` for every field this export has.
+Same column names and order as `wd_sales_clean` for every field this
+export has.
 
-Dropped: `completed_date` (→ `order_date`), `product_type` and `department` (→ `item_category`),
-pickup/ship dates and tracking number (logistics), `order_notes` (free text), plus the helper
-columns.
+Dropped: `completed_date` (→ `order_date`), `product_type` and
+`department` (→ `item_category`), pickup/ship dates and tracking number
+(logistics), `order_notes` (free text), plus the helper columns.
 
 ```{r}
 #| label: final

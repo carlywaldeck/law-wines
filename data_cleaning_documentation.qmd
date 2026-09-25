@@ -89,14 +89,9 @@ editor: visual
 
 ### **Members Cleaning**
 
-**IDs and contact fields** 	
+**IDs and contact fields**
 
-Standardized:
-- emails 
-- cities
-- countries
-- ZIP codes
-- Phone numbers
+Standardized: - emails - cities - countries - ZIP codes - Phone numbers
 
 **Dates and Age**
 
@@ -104,9 +99,9 @@ Standardized:
 - Created dated events
 - Derived age from birth dates.
 
-**Customers and Clubs**	
+**Customers and Clubs**
 
-- Added: 
+- Added:
 - customer_key
 - internal and guest account flags
 - Black/White club_tier
@@ -116,56 +111,32 @@ Standardized:
 - Removed exact duplicate row
 - Customers appearing in both snapshots kept
 
-**Club Changes**	
+**Club Changes**
 
-Classified: 
-- 176 upgrades
-- 59 downgrades
-- 487 other club changes
--All separated from cancellations
+Classified: - 176 upgrades - 59 downgrades - 487 other club changes -All separated from cancellations
 
 ### **Waitlist Data Cleaning**
 
 #### **Active and Hold Members**
+
 - Removed `Expiration Date` column and unnamed column from data
 
-**Data Types**
-- `customer number` becomes a whole number
-- `member since` and `birth date` becomes a real date
-- `Total customer value` becomes a number and drops $$
+**Data Types** - `customer number` becomes a whole number - `member since` and `birth date` becomes a real date - `Total customer value` becomes a number and drops \$\$
 
-**Standardizing Text**
-- Cleaned the spellings in `club sign up source` to be consistent (EX. POS, Website, etc.)
-- `Active Status` is now either "Active" or "On Hold"; Got rid of mixed spellings
-- `bill email` is now all lowercase to prevent duplicates
+**Standardizing Text** - Cleaned the spellings in `club sign up source` to be consistent (EX. POS, Website, etc.) - `Active Status` is now either "Active" or "On Hold"; Got rid of mixed spellings - `bill email` is now all lowercase to prevent duplicates
 
-**Phone Numbers**
-- Get rid of dashes in phone numbers
-- Remove leading "1" in phone numbers
-- Set any numbers longer than 10 digits to NA
+**Phone Numbers** - Get rid of dashes in phone numbers - Remove leading "1" in phone numbers - Set any numbers longer than 10 digits to NA
 
-**Test Records**
-- Delete rows where club name is "Test Club"
-- Changes "SQL_MIGRATION-20260803" in `sales_rep` to be NA since that is not real person
+**Test Records** - Delete rows where club name is "Test Club" - Changes "SQL_MIGRATION-20260803" in `sales_rep` to be NA since that is not real person
 
-**Duplicates**
-- Check for customer numbers that appear more than once
+**Duplicates** - Check for customer numbers that appear more than once
 
 #### **Cancelled Members**
 
-**Tidy**
-- Turn empty strings into NAs
+**Tidy** - Turn empty strings into NAs
 
-**Customer Number**
-- Converts `customer_number` to a whole number
-- Delete rows with no customer number (Only one row)
+**Customer Number** - Converts `customer_number` to a whole number - Delete rows with no customer number (Only one row)
 
-**Standardize**
-- `club_source` spellings are consistent (same as in Active and Hold Members data)
-- `bill_email` is now all lowercase to prevent duplicates
+**Standardize** - `club_source` spellings are consistent (same as in Active and Hold Members data) - `bill_email` is now all lowercase to prevent duplicates
 
-**Cancellation Reasons**
-- Replaces NA in `cancel_reason` to be "Not Provided"
-
-
-
+**Cancellation Reasons** - Replaces NA in `cancel_reason` to be "Not Provided"
