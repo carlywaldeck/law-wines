@@ -1,0 +1,378 @@
+---
+title: "Law Estate Wines — Post-Waitlist Sales Cleaning"
+subtitle: "Sales export, 2022-08 to 2025-10"
+author: "Carly"
+date: today
+format:
+  html:
+    toc: true
+    df-print: paged
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+## Overview
+
+This cleans the post-waitlist sales export and writes `post_waitlist_sales_clean.csv` (and `.rds`),
+**one row per line item**, using the same rules and column names as `wd_sales_clean`, so the two
+can be stacked into one 2013–2025 table.
+
+This export has fewer fields than the WD files, so some WD columns don't exist here:
+no order time, taxes, order total, original/unit price, ship-to address, phone, birth date,
+original order number, or club tier.
+
+::: {.callout-note}
+**Coverage:** starts 2022-08-01, where the WD data effectively ends (the last WD file has only
+2 rows after 2022-07-31). **Order numbers restart at 1011 in October 2025**, so they collide with
+2013 WD order numbers. When stacking, identify orders by `order_number` + dataset, not
+`order_number` alone.
+:::
+
+::: {.callout-warning}
+The output contains customer PII. Keep `post_waitlist_sales_clean.csv` / `.rds` in `.gitignore`.
+:::
+
+## Setup
+
+```{r}
+#| label: setup
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(janitor)
+library(here)
+```
+
+## Read
+
+Reads every `Sales Post Waitlist ... .csv` in the project root (works whether the export is one
+file or split into parts), all columns as text. Types are parsed explicitly below.
+
+```{r}
+#| label: read
+paths <- list.files(here(), pattern = "^Sales Post Waitlist.*\\.csv$", full.names = TRUE)
+stopifnot(length(paths) >= 1)
+basename(paths)
+
+raw <- paths |>
+  lapply(\(p) read_csv(p, col_types = cols(.default = col_character()),
+                       name_repair = "unique_quiet") |>
+           mutate(source_file = basename(p))) |>
+  bind_rows() |>
+  clean_names() |>
+  remove_empty("cols") |>                       # 3 blank trailing columns, empty Order Source Code
+  rename(any_of(c(order_number = "r")))         # order-number header is truncated to "r"
+
+dim(raw)
+```
+
+### De-duplicate
+
+97 rows are exact duplicates, with whole orders repeated line for line (an export artifact).
+`source_file` is ignored for the comparison.
+
+```{r}
+#| label: dedupe
+raw <- raw[vctrs::vec_unique_loc(select(raw, -source_file)), ]
+nrow(raw)
+```
+
+## Helpers
+
+- **Money** comes as text: `"$1,234.00 "`, `"($88.00)"` for negatives, or a bare `"87"`.
+- **Postal codes:** US zips padded to 5 digits and ZIP+4 truncated; Canadian and other
+  international codes kept as-is.
+- **States:** full names ("California") converted to codes; international regions
+  ("Hong Kong", "Antwerp", "Dubai") get `bill_country = "Other"` and no state code.
+
+```{r}
+#| label: helpers
+parse_money <- function(x) {
+  x   <- str_trim(x)
+  neg <- str_detect(x, "^\\(.*\\)$|^-")
+  v   <- parse_number(x)
+  if_else(coalesce(neg, FALSE), -abs(v), v)
+}
+
+us_codes     <- c(state.abb, "DC", "PR", "VI", "GU", "AS", "MP", "AA", "AE", "AP")
+ca_provinces <- c("AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT")
+
+clean_state <- function(s) {
+  s  <- str_squish(s)
+  up <- str_to_upper(s)
+  case_when(
+    up %in% c(us_codes, ca_provinces)  ~ up,
+    str_to_title(s) %in% state.name    ~ state.abb[match(str_to_title(s), state.name)],
+    TRUE                               ~ NA_character_
+  )
+}
+
+clean_postal <- function(z, country) {
+  z <- str_to_upper(str_remove_all(z, "[^A-Za-z0-9]"))
+  case_when(
+    is.na(z) | z == ""              ~ NA_character_,
+    country %in% c("CA", "Other")   ~ z,
+    str_detect(z, "[A-Z]")          ~ z,
+    nchar(z) == 4                   ~ str_pad(z, 5, pad = "0"),
+    nchar(z) == 5                   ~ z,
+    nchar(z) %in% 8:9               ~ str_sub(str_pad(z, 9, pad = "0"), 1, 5),
+    TRUE                            ~ NA_character_
+  )
+}
+
+clean_city <- function(x) str_to_title(str_squish(str_remove(x, ",\\s*$")))
+
+wine_rx <- regex(
+  "Beyond Category|First Tracks|The Nines|Nines|Cabernet Sauvignon|Aspire|Audacious|Beguiling|Intrepid|Sagacious|Prima|Cirque|Rose|Soph|\\bBEG\\b|\\bSAG\\b",
+  ignore_case = TRUE
+)
+year_rx <- "(?<!\\d)20[0-2]\\d(?!\\d)"   # also matches "2021Beguiling" (no space)
+```
+
+## Row-level cleaning
+
+- Drops 1,039 empty rows (no product, no quantity, $0).
+- Parses dates, quantities, and money; negative quantity or price = refund.
+- Fixes "Repeatcustomer" → "RepeatCustomer".
+- Standardizes emails, cities, states, zips; adds `bill_country`.
+- Sets zip **94111** to `NA` unless the city is San Francisco. It's the POS default for walk-ins
+  (about 1,000 rows, mostly with no city or state).
+- Sales associates: shared credit ("Addie/Renee", "Renee and Nicole D.") → "Multiple";
+  first-name-only and spelling variants fixed.
+- Flags house accounts (`is_internal`) and walk-in guest accounts (`is_guest_account`);
+  neither gets a `customer_key`.
+
+```{r}
+#| label: clean-rows
+lines <- raw |>
+  filter(!is.na(product_name)) |>
+  mutate(
+    # ---- types ----
+    order_number    = as.integer(order_number),
+    customer_number = as.integer(parse_number(customer_number)),
+    order_date      = mdy(completed_date),
+    quantity_sold   = as.numeric(quantity_sold),
+    across(c(ext_item_price, ext_item_shipping, item_discount), parse_money),
+    # 110 $0 waitlist lines (Oct 2025) have blank shipping/discount
+    across(c(ext_item_shipping, item_discount), ~ coalesce(.x, 0)),
+
+    # ---- customer status ----
+    contact_status = recode(contact_status, "Repeatcustomer" = "RepeatCustomer"),
+
+    # ---- location ----
+    bill_email      = na_if(str_to_lower(str_trim(bill_email)), ""),
+    bill_city       = clean_city(bill_city),
+    state_raw       = str_squish(bill_state_code),
+    bill_state_code = clean_state(state_raw),
+    bill_country    = case_when(
+      bill_state_code %in% ca_provinces       ~ "CA",
+      !is.na(bill_state_code)                 ~ "US",
+      !is.na(state_raw) & state_raw != "0"    ~ "Other"
+    ),
+    bill_zip = clean_postal(bill_zip, bill_country),
+    bill_zip = if_else(bill_zip == "94111" & coalesce(bill_city, "") != "San Francisco",
+                       NA_character_, bill_zip),
+
+    # ---- sales associates ----
+    sales_associate = case_when(
+      str_detect(sales_associate, "/|,| and ")  ~ "Multiple",
+      sales_associate == "Kim"                  ~ "Kim Roth",
+      sales_associate == "Kelli law"            ~ "Kelli Law",
+      sales_associate == "KayDee Rickerd"       ~ "Kaye Dee Rickerd",
+      sales_associate == "Pedro"                ~ "Pedro Vasquez",
+      TRUE                                      ~ sales_associate
+    ),
+
+    # ---- house / guest accounts ----
+    bill_full_name = str_to_lower(str_c(coalesce(bill_first_name, ""), " ",
+                                        coalesce(bill_last_name, ""))),
+    is_internal = coalesce(str_detect(bill_email, "@lawestatewines\\.com$"), FALSE) |
+                  str_detect(bill_full_name, "bottle breakage|event marketing|employee samples|charity events") |
+                  coalesce(bill_company == "Law Estate Wines", FALSE),
+    is_guest_account = str_detect(bill_full_name, "^(guest customer|pos guest)$"),
+
+    customer_key = if_else(
+      is_internal | is_guest_account, NA_character_,
+      coalesce(as.character(customer_number),
+               if_else(!is.na(bill_email), str_c("email:", bill_email), NA_character_))
+    ),
+
+    # ---- flags ----
+    is_refund = coalesce(quantity_sold < 0, FALSE) | coalesce(ext_item_price < 0, FALSE),
+    is_comp   = coalesce(str_detect(sales_attribute, regex(
+                  "sample|donation|replacement|corked|employee|gift/prize|poured at event|publication|team tasting",
+                  ignore_case = TRUE)), FALSE)
+  )
+```
+
+## Product standardization
+
+Same categories as the WD cleaning, plus `adjustment` (tip adjustments, a wholesale partial
+payment). New in this export: 3L bottles, "Magnum" written before the vintage, names without a
+space ("2021Beguiling"), Cabernet Sauvignon as a regular wine, and many dated event tickets.
+
+The first matching rule wins. Events come before tasting so "Winemaker Tasting … Ticket" counts
+as an event, and shipping comes before wine sets so "Ship box- 12pack" counts as shipping.
+
+```{r}
+#| label: products
+lines <- lines |>
+  mutate(
+    pn = str_to_lower(product_name),
+
+    item_category = case_when(
+      str_detect(pn, "cottage")                                               ~ "lodging",
+      str_detect(pn, "tip adjustment|partial payment")                        ~ "adjustment",
+      str_detect(pn, "ship box|cool pack|wooden ?box|topper|re-?route|shipping") ~ "shipping_packaging",
+      str_detect(pn, "membership|waitlist|migrate [bw]lwc|library-|add on")   ~ "club_admin",
+      str_detect(pn, "gift certificate|etching|engraving")                    ~ "merch",
+      str_detect(pn, "insert|brochure|holiday card")                          ~ "promo_gift",
+      str_detect(pn, "vertical|horizontal|bundle|\\dpack|package")            ~ "wine_set",
+      str_detect(pn, "meal|lunch|food plate|cheese or chocolate")             ~ "food",
+      str_detect(pn, paste0(
+        "ticket|dinner|party|pick ?up|pup22|wine camp|new side of law|takeover|spotlight|",
+        "inspiration|vine2vessel|shuttle|site fee|bld \\d|blade|gratuity|^ppf |",
+        "(mon|tues|wednes|thurs|fri|satur|sun)day,"))                          ~ "event",
+      str_detect(pn, paste0(
+        "tasting|t&t|(new|return) (guest|member|industry)|member guest|",
+        "^\\$\\d+ (new|return)|walking t/t|no show fee"))                      ~ "tasting",
+      str_detect(pn, "^glass")                                                ~ "glass_pour",
+      str_detect(pn, "gift|card")                                             ~ "promo_gift",
+      str_detect(product_name, wine_rx) | str_detect(pn, year_rx)             ~ "wine",
+      TRUE                                                                    ~ "other"
+    ),
+
+    tasting_waived = item_category == "tasting" & str_detect(pn, "waived"),
+
+    wine_name = if_else(item_category %in% c("wine", "glass_pour", "wine_set"),
+                        str_extract(product_name, wine_rx), NA_character_),
+    wine_name = case_match(str_to_lower(wine_name),
+                           c("nines", "the nines") ~ "The Nines",
+                           "beg"                   ~ "Beguiling",
+                           "sag"                   ~ "Sagacious",
+                           .default = str_to_title(wine_name)),
+
+    vintage = if_else(item_category %in% c("wine", "glass_pour"),
+                      as.integer(str_extract(pn, year_rx)), NA_integer_),
+
+    bottle_format = if_else(item_category == "wine",
+                            case_when(str_detect(pn, "\\b3l\\b")          ~ "3L",
+                                      str_detect(pn, "magnum|1\\.5l")     ~ "1.5L",
+                                      TRUE                                ~ "750ml"),
+                            NA_character_),
+
+    # canonical name: "2021 Audacious", "2021 Audacious Magnum", "2020 Intrepid 3L"
+    product_std = case_when(
+      item_category == "wine" ~ str_squish(str_c(
+        coalesce(as.character(vintage), ""), " ", wine_name,
+        case_when(bottle_format == "1.5L" ~ " Magnum",
+                  bottle_format == "3L"   ~ " 3L",
+                  TRUE                    ~ ""))),
+      TRUE ~ str_squish(str_remove_all(product_name,
+               regex("\\(?\\s*-?\\s*sold out!*\\s*-?\\s*\\)?", ignore_case = TRUE)))
+    )
+  ) |>
+  select(-pn)
+```
+
+## Final table
+
+Same column names and order as `wd_sales_clean` for every field this export has.
+
+Dropped: `completed_date` (→ `order_date`), `product_type` and `department` (→ `item_category`),
+pickup/ship dates and tracking number (logistics), `order_notes` (free text), plus the helper
+columns.
+
+```{r}
+#| label: final
+sales_clean <- lines |>
+  select(
+    # order
+    source_file, order_number, order_type, order_date,
+    sales_associate, sales_attribute, pickup,
+    # customer
+    customer_key, customer_number, contact_status, is_internal, is_guest_account,
+    bill_first_name, bill_last_name, bill_company, bill_email,
+    bill_city, bill_state_code, bill_zip, bill_country,
+    # product
+    product_sku, product_name, product_std, item_category,
+    wine_name, vintage, bottle_format, tasting_waived,
+    # money
+    quantity_sold, item_discount, ext_item_price, ext_item_shipping,
+    # flags
+    is_refund, is_comp
+  )
+```
+
+## Sanity checks
+
+### Size and date range
+
+```{r}
+#| label: check-size
+cat("Lines:", nrow(sales_clean),
+    " Orders:", n_distinct(sales_clean$order_number),
+    " Customers:", n_distinct(sales_clean$customer_key, na.rm = TRUE), "\n")
+range(sales_clean$order_date)
+count(sales_clean, year = year(order_date))
+```
+
+### Line items by category
+
+```{r}
+#| label: check-category
+count(sales_clean, item_category, sort = TRUE)
+```
+
+### Wine names
+
+Look for one wine split across two `product_std` values.
+
+```{r}
+#| label: check-wines
+count(filter(sales_clean, item_category == "wine"), product_std, sort = TRUE)
+```
+
+### Unmatched products
+
+```{r}
+#| label: check-other
+distinct(filter(sales_clean, item_category == "other"), product_name)
+```
+
+### Parsing problems
+
+These should all be 0.
+
+```{r}
+#| label: check-parsing
+sales_clean |>
+  summarise(
+    bad_date     = sum(is.na(order_date)),
+    bad_qty      = sum(is.na(quantity_sold)),
+    bad_price    = sum(is.na(ext_item_price)),
+    bad_shipping = sum(is.na(ext_item_shipping))
+  )
+```
+
+### Flags
+
+```{r}
+#| label: check-flags
+sales_clean |>
+  summarise(refund = sum(is_refund), comp = sum(is_comp),
+            internal = sum(is_internal), guest_account = sum(is_guest_account))
+count(sales_clean, bill_country)
+```
+
+## Write output
+
+```{r}
+#| label: write
+# .rds keeps column types (zips stay text with leading zeros, dates stay dates)
+saveRDS(sales_clean, here("post_waitlist_sales_clean.rds"))
+write_csv(sales_clean, here("post_waitlist_sales_clean.csv"))
+```
