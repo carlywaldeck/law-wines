@@ -1,0 +1,394 @@
+---
+title: "Law Estate Wines — Wine Club Member Segmentation"
+author: "Carly"
+date: today
+format:
+  html:
+    toc: true
+    df-print: paged
+    embed-resources: true
+    fig-width: 8
+    fig-height: 5
+execute:
+  warning: false
+  message: false
+---
+
+## Overview
+
+Groups wine club members by **purchasing behavior** using k-means, then checks the result with
+hierarchical clustering (Ward's method).
+
+**Data:** the two cleaned sales datasets (`wd_sales_clean.rds`, 2013–2022, and
+`post_waitlist_sales_clean.rds`, 2022–2025), stacked and aggregated to **one row per member**.
+The member files (active/cancelled) are better used to *describe* the clusters afterward, for
+example "which segment cancels most", than as clustering inputs, because cancellation is an
+outcome, not a behavior.
+
+**Who's included:**
+
+- Anyone with a `ClubMember` contact status or a `ClubOrder` on record.
+- At least one order since 2022-08-01, so the segments describe the current membership.
+- At least 2 orders and some wine purchased, so per-year rates are meaningful.
+- House accounts and walk-in guest accounts are excluded.
+
+## Setup
+
+```{r}
+#| label: setup
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(lubridate)
+library(cluster)   # silhouette(); ships with R
+library(here)
+
+set.seed(518)
+
+# ---- parameters: change these to redefine the population ----
+min_last_order <- as.Date("2022-08-01")   # member must have ordered since this date
+min_orders     <- 2
+k_grid         <- 2:8
+```
+
+## Load and stack sales
+
+Order numbers restart in Oct 2025 in the post-waitlist data, so orders are identified by
+dataset + order number (`order_uid`).
+
+```{r}
+#| label: load
+wd <- readRDS(here("wd_sales_clean.rds"))            |> mutate(dataset = "WD")
+pw <- readRDS(here("post_waitlist_sales_clean.rds")) |> mutate(dataset = "PW")
+
+common <- intersect(names(wd), names(pw))
+sales  <- bind_rows(wd[common], pw[common]) |>
+  mutate(order_uid = str_c(dataset, "-", order_number))
+
+as_of <- max(sales$order_date, na.rm = TRUE)
+cat("Lines:", nrow(sales), " Date range:", format(range(sales$order_date)), "\n")
+
+# customer numbers should carry across both exports (same WineDirect account IDs)
+cat("Customers in both datasets:",
+    length(intersect(wd$customer_key, pw$customer_key)), "\n")
+```
+
+## Identify members
+
+```{r}
+#| label: members
+lines <- sales |>
+  filter(!is.na(customer_key), !is_internal, !is_guest_account)
+
+member_keys <- lines |>
+  group_by(customer_key) |>
+  summarise(is_member = any(contact_status == "ClubMember", na.rm = TRUE) |
+                        any(order_type == "ClubOrder", na.rm = TRUE)) |>
+  filter(is_member) |>
+  pull(customer_key)
+
+lines <- filter(lines, customer_key %in% member_keys)
+length(member_keys)
+```
+
+## Build member features
+
+Order-level fields (order type, pickup) repeat on every line, so they're collapsed to one row
+per order first. Orders made up entirely of refunds are dropped.
+
+Rates are **per active year**: first order to last order, with a 1-year floor so new members
+aren't inflated. Recency is kept as its own feature, so a lapsed member shows up as high
+recency rather than low frequency.
+
+```{r}
+#| label: features
+orders <- lines |>
+  group_by(customer_key, order_uid) |>
+  summarise(
+    order_date  = first(order_date),
+    order_type  = first(order_type),
+    pickup      = first(pickup),
+    has_tasting = any(item_category == "tasting"),
+    has_event   = any(item_category == "event"),
+    all_refund  = all(is_refund),
+    .groups = "drop"
+  ) |>
+  filter(!all_refund)
+
+# wine purchases, in 750ml-equivalent bottles (magnum = 2, 3L = 4)
+wine <- lines |>
+  filter(item_category == "wine", !is_comp) |>
+  mutate(btl_eq = quantity_sold * case_when(bottle_format == "1.5L" ~ 2,
+                                            bottle_format == "3L"   ~ 4,
+                                            TRUE                    ~ 1)) |>
+  group_by(customer_key) |>
+  summarise(
+    bottles      = sum(btl_eq),
+    wine_spend   = sum(ext_item_price),
+    wine_variety = n_distinct(wine_name[quantity_sold > 0], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+spend <- lines |>
+  filter(!is_comp) |>
+  group_by(customer_key) |>
+  summarise(net_spend = sum(ext_item_price), .groups = "drop")
+
+# profile-only attributes (not clustered on)
+geo <- lines |>
+  arrange(desc(order_date)) |>
+  group_by(customer_key) |>
+  summarise(state = first(na.omit(bill_state_code)),
+            zip   = first(na.omit(bill_zip)), .groups = "drop") |>
+  mutate(in_ca    = coalesce(state == "CA", FALSE),
+         local_slo = coalesce(str_starts(zip, "934"), FALSE))   # SLO County zips
+
+feat <- orders |>
+  group_by(customer_key) |>
+  summarise(
+    first_order      = min(order_date),
+    last_order       = max(order_date),
+    n_orders         = n(),
+    club_order_share = mean(order_type == "ClubOrder"),
+    online_share     = mean(order_type == "Website"),
+    pickup_share     = mean(pickup == "Yes", na.rm = TRUE),
+    tasting_visits   = sum(has_tasting),
+    events           = sum(has_event),
+    .groups = "drop"
+  ) |>
+  left_join(wine,  by = "customer_key") |>
+  left_join(spend, by = "customer_key") |>
+  left_join(geo,   by = "customer_key") |>
+  mutate(
+    active_yrs     = pmax(as.numeric(last_order - first_order) / 365.25, 1),
+    tenure_yrs     = as.numeric(as_of - first_order) / 365.25,
+    recency_days   = as.numeric(as_of - last_order),
+    orders_per_yr  = n_orders / active_yrs,
+    bottles_per_yr = coalesce(bottles, 0) / active_yrs,
+    spend_per_yr   = net_spend / active_yrs,
+    avg_btl_price  = if_else(coalesce(bottles, 0) > 0, wine_spend / bottles, NA_real_),
+    tasting_per_yr = tasting_visits / active_yrs,
+    events_per_yr  = events / active_yrs,
+    pickup_share   = coalesce(pickup_share, 0)
+  ) |>
+  filter(last_order >= min_last_order,
+         n_orders   >= min_orders,
+         coalesce(bottles, 0) > 0,
+         avg_btl_price > 0)
+
+nrow(feat)
+```
+
+## Prepare the clustering matrix
+
+K-means uses Euclidean distance, so features must be on comparable scales and not dominated
+by a few extreme buyers:
+
+1. `log1p()` on the skewed count and rate features.
+2. Winsorize at the 1st/99th percentile, so a handful of collectors don't get their own cluster.
+3. Standardize (mean 0, SD 1).
+
+`spend_per_yr` is left out because it's roughly bottles × price, which are both already in.
+
+```{r}
+#| label: prep
+log_vars   <- c("recency_days", "tenure_yrs", "orders_per_yr", "bottles_per_yr",
+                "avg_btl_price", "tasting_per_yr", "events_per_yr", "wine_variety")
+share_vars <- c("club_order_share", "pickup_share", "online_share")
+cluster_vars <- c(log_vars, share_vars)
+
+winsor <- function(x, p = c(0.01, 0.99)) {
+  q <- quantile(x, p, na.rm = TRUE)
+  pmin(pmax(x, q[1]), q[2])
+}
+
+X <- feat |>
+  select(all_of(cluster_vars)) |>
+  mutate(across(all_of(log_vars), log1p),
+         across(everything(), winsor)) |>
+  scale()
+
+stopifnot(!anyNA(X))
+dim(X)
+```
+
+### Feature correlations
+
+Pairs above about |0.8| are nearly redundant. Consider dropping one from `cluster_vars`.
+
+```{r}
+#| label: corr
+#| fig-height: 6
+cor(X) |>
+  as.data.frame() |>
+  tibble::rownames_to_column("var1") |>
+  pivot_longer(-var1, names_to = "var2", values_to = "r") |>
+  ggplot(aes(var1, var2, fill = r)) +
+  geom_tile() +
+  geom_text(aes(label = round(r, 2)), size = 2.5) +
+  scale_fill_gradient2(limits = c(-1, 1)) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Choosing k
+
+Two views: the elbow in within-cluster sum of squares, and average silhouette width
+(higher is better). Silhouette is computed on a 3,000-member sample for speed.
+
+```{r}
+#| label: choose-k
+km_fits <- lapply(k_grid, \(k) kmeans(X, centers = k, nstart = 50, iter.max = 100))
+
+sil_idx <- sample(nrow(X), min(3000, nrow(X)))
+d_sil   <- dist(X[sil_idx, ])
+
+k_eval <- tibble(
+  k   = k_grid,
+  wss = sapply(km_fits, `[[`, "tot.withinss"),
+  silhouette = sapply(km_fits, \(f)
+    mean(silhouette(f$cluster[sil_idx], d_sil)[, "sil_width"]))
+)
+k_eval
+
+k_eval |>
+  pivot_longer(-k) |>
+  ggplot(aes(k, value)) +
+  geom_line() + geom_point() +
+  facet_wrap(~ name, scales = "free_y") +
+  scale_x_continuous(breaks = k_grid) +
+  theme_minimal()
+```
+
+Pick `k` from the plots and from how interpretable the profiles below are. The default is the
+k with the highest silhouette. Override it if a neighboring k gives more useful groups.
+
+```{r}
+#| label: k-final
+k_final <- k_eval$k[which.max(k_eval$silhouette)]
+# k_final <- 4   # <- override here
+k_final
+
+km <- km_fits[[which(k_grid == k_final)]]
+feat$cluster <- factor(km$cluster)
+table(feat$cluster)
+```
+
+## Check with hierarchical clustering
+
+Ward's method on the same matrix. If most members land in matching groups under both methods,
+the segments are real structure and not an artifact of k-means' random starts.
+
+```{r}
+#| label: hclust
+hc <- hclust(dist(X), method = "ward.D2")
+feat$hc_cluster <- factor(cutree(hc, k = k_final))
+
+table(kmeans = feat$cluster, hierarchical = feat$hc_cluster)
+
+# share of members whose hierarchical group is the best match for their k-means group
+tab <- table(feat$cluster, feat$hc_cluster)
+cat("Agreement:", round(sum(apply(tab, 1, max)) / sum(tab), 3), "\n")
+```
+
+## Visualize
+
+The first two principal components of the clustering matrix, colored by k-means cluster.
+
+```{r}
+#| label: pca
+pca <- prcomp(X)
+pve <- round(100 * summary(pca)$importance[2, 1:2], 1)
+
+as_tibble(pca$x[, 1:2]) |>
+  mutate(cluster = feat$cluster) |>
+  ggplot(aes(PC1, PC2, color = cluster)) +
+  geom_point(alpha = 0.4, size = 1) +
+  labs(x = str_glue("PC1 ({pve[1]}%)"), y = str_glue("PC2 ({pve[2]}%)")) +
+  theme_minimal()
+```
+
+## Cluster profiles
+
+### What distinguishes each cluster
+
+Cluster centers in standardized units. Positive means above the average member, and ±1
+means one SD from average.
+
+```{r}
+#| label: profile-heatmap
+#| fig-height: 6
+km$centers |>
+  as.data.frame() |>
+  mutate(cluster = factor(row_number())) |>
+  pivot_longer(-cluster, names_to = "feature", values_to = "z") |>
+  ggplot(aes(cluster, feature, fill = z)) +
+  geom_tile() +
+  geom_text(aes(label = round(z, 1)), size = 3) +
+  scale_fill_gradient2() +
+  labs(x = "Cluster", y = NULL) +
+  theme_minimal()
+```
+
+### In real units
+
+Medians per cluster, plus the profile-only attributes (spend, location).
+
+```{r}
+#| label: profile-table
+feat |>
+  group_by(cluster) |>
+  summarise(
+    members            = n(),
+    pct_of_spend       = sum(net_spend) / sum(feat$net_spend),
+    recency_days       = median(recency_days),
+    tenure_yrs         = median(tenure_yrs),
+    orders_per_yr      = median(orders_per_yr),
+    bottles_per_yr     = median(bottles_per_yr),
+    spend_per_yr       = median(spend_per_yr),
+    avg_btl_price      = median(avg_btl_price),
+    wine_variety       = median(wine_variety),
+    club_order_share   = median(club_order_share),
+    pickup_share       = median(pickup_share),
+    online_share       = median(online_share),
+    tasting_per_yr     = median(tasting_per_yr),
+    events_per_yr      = median(events_per_yr),
+    pct_in_ca          = mean(in_ca),
+    pct_local_slo      = mean(local_slo)
+  ) |>
+  mutate(across(where(is.double), \(x) round(x, 2)))
+```
+
+After reading the profiles, give each cluster a name here, for example "Local regulars",
+"Club-only shippers", "Lapsed", "Collectors":
+
+```{r}
+#| label: names
+cluster_names <- c(
+  "1" = "Cluster 1",
+  "2" = "Cluster 2",
+  "3" = "Cluster 3",
+  "4" = "Cluster 4",
+  "5" = "Cluster 5",
+  "6" = "Cluster 6",
+  "7" = "Cluster 7",
+  "8" = "Cluster 8"
+)[seq_len(k_final)]
+
+feat <- mutate(feat, segment = cluster_names[as.character(cluster)])
+count(feat, segment)
+```
+
+## Save
+
+```{r}
+#| label: save
+member_segments <- feat |>
+  select(customer_key, segment, cluster, hc_cluster, all_of(cluster_vars),
+         spend_per_yr, net_spend, n_orders, first_order, last_order, in_ca, local_slo)
+
+saveRDS(member_segments, here("member_segments.rds"))
+readr::write_csv(member_segments, here("member_segments.csv"))
+```
