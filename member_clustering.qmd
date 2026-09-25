@@ -12,24 +12,30 @@ format:
 execute:
   warning: false
   message: false
+editor: 
+  markdown: 
+    wrap: 72
 ---
 
 ## Overview
 
-Groups wine club members by **purchasing behavior** using k-means, then checks the result with
-hierarchical clustering (Ward's method).
+Groups wine club members by **purchasing behavior** using k-means, then
+checks the result with hierarchical clustering (Ward's method).
 
-**Data:** the two cleaned sales datasets (`wd_sales_clean.rds`, 2013–2022, and
-`post_waitlist_sales_clean.rds`, 2022–2025), stacked and aggregated to **one row per member**.
-The member files (active/cancelled) are better used to *describe* the clusters afterward, for
-example "which segment cancels most", than as clustering inputs, because cancellation is an
-outcome, not a behavior.
+**Data:** the two cleaned sales datasets (`wd_sales_clean.rds`,
+2013–2022, and `post_waitlist_sales_clean.rds`, 2022–2025), stacked and
+aggregated to **one row per member**. The member files
+(active/cancelled) are better used to *describe* the clusters afterward,
+for example "which segment cancels most", than as clustering inputs,
+because cancellation is an outcome, not a behavior.
 
 **Who's included:**
 
 - Anyone with a `ClubMember` contact status or a `ClubOrder` on record.
-- At least one order since 2022-08-01, so the segments describe the current membership.
-- At least 2 orders and some wine purchased, so per-year rates are meaningful.
+- At least one order since 2022-08-01, so the segments describe the
+  current membership.
+- At least 2 orders and some wine purchased, so per-year rates are
+  meaningful.
 - House accounts and walk-in guest accounts are excluded.
 
 ## Setup
@@ -54,8 +60,8 @@ k_grid         <- 2:8
 
 ## Load and stack sales
 
-Order numbers restart in Oct 2025 in the post-waitlist data, so orders are identified by
-dataset + order number (`order_uid`).
+Order numbers restart in Oct 2025 in the post-waitlist data, so orders
+are identified by dataset + order number (`order_uid`).
 
 ```{r}
 #| label: load
@@ -94,12 +100,14 @@ length(member_keys)
 
 ## Build member features
 
-Order-level fields (order type, pickup) repeat on every line, so they're collapsed to one row
-per order first. Orders made up entirely of refunds are dropped.
+Order-level fields (order type, pickup) repeat on every line, so they're
+collapsed to one row per order first. Orders made up entirely of refunds
+are dropped.
 
-Rates are **per active year**: first order to last order, with a 1-year floor so new members
-aren't inflated. Recency is kept as its own feature, so a lapsed member shows up as high
-recency rather than low frequency.
+Rates are **per active year**: first order to last order, with a 1-year
+floor so new members aren't inflated. Recency is kept as its own
+feature, so a lapsed member shows up as high recency rather than low
+frequency.
 
 ```{r}
 #| label: features
@@ -182,14 +190,16 @@ nrow(feat)
 
 ## Prepare the clustering matrix
 
-K-means uses Euclidean distance, so features must be on comparable scales and not dominated
-by a few extreme buyers:
+K-means uses Euclidean distance, so features must be on comparable
+scales and not dominated by a few extreme buyers:
 
-1. `log1p()` on the skewed count and rate features.
-2. Winsorize at the 1st/99th percentile, so a handful of collectors don't get their own cluster.
-3. Standardize (mean 0, SD 1).
+1.  `log1p()` on the skewed count and rate features.
+2.  Winsorize at the 1st/99th percentile, so a handful of collectors
+    don't get their own cluster.
+3.  Standardize (mean 0, SD 1).
 
-`spend_per_yr` is left out because it's roughly bottles × price, which are both already in.
+`spend_per_yr` is left out because it's roughly bottles × price, which
+are both already in.
 
 ```{r}
 #| label: prep
@@ -215,7 +225,8 @@ dim(X)
 
 ### Feature correlations
 
-Pairs above about |0.8| are nearly redundant. Consider dropping one from `cluster_vars`.
+Pairs above about \|0.8\| are nearly redundant. Consider dropping one
+from `cluster_vars`.
 
 ```{r}
 #| label: corr
@@ -235,8 +246,9 @@ cor(X) |>
 
 ## Choosing k
 
-Two views: the elbow in within-cluster sum of squares, and average silhouette width
-(higher is better). Silhouette is computed on a 3,000-member sample for speed.
+Two views: the elbow in within-cluster sum of squares, and average
+silhouette width (higher is better). Silhouette is computed on a
+3,000-member sample for speed.
 
 ```{r}
 #| label: choose-k
@@ -262,13 +274,14 @@ k_eval |>
   theme_minimal()
 ```
 
-Pick `k` from the plots and from how interpretable the profiles below are. The default is the
-k with the highest silhouette. Override it if a neighboring k gives more useful groups.
+Pick `k` from the plots and from how interpretable the profiles below
+are. The default is the k with the highest silhouette. Override it if a
+neighboring k gives more useful groups.
 
 ```{r}
 #| label: k-final
 k_final <- k_eval$k[which.max(k_eval$silhouette)]
-# k_final <- 4   # <- override here
+k_final <- 4   # <- override here
 k_final
 
 km <- km_fits[[which(k_grid == k_final)]]
@@ -278,8 +291,9 @@ table(feat$cluster)
 
 ## Check with hierarchical clustering
 
-Ward's method on the same matrix. If most members land in matching groups under both methods,
-the segments are real structure and not an artifact of k-means' random starts.
+Ward's method on the same matrix. If most members land in matching
+groups under both methods, the segments are real structure and not an
+artifact of k-means' random starts.
 
 ```{r}
 #| label: hclust
@@ -295,7 +309,8 @@ cat("Agreement:", round(sum(apply(tab, 1, max)) / sum(tab), 3), "\n")
 
 ## Visualize
 
-The first two principal components of the clustering matrix, colored by k-means cluster.
+The first two principal components of the clustering matrix, colored by
+k-means cluster.
 
 ```{r}
 #| label: pca
@@ -314,8 +329,8 @@ as_tibble(pca$x[, 1:2]) |>
 
 ### What distinguishes each cluster
 
-Cluster centers in standardized units. Positive means above the average member, and ±1
-means one SD from average.
+Cluster centers in standardized units. Positive means above the average
+member, and ±1 means one SD from average.
 
 ```{r}
 #| label: profile-heatmap
@@ -361,20 +376,16 @@ feat |>
   mutate(across(where(is.double), \(x) round(x, 2)))
 ```
 
-After reading the profiles, give each cluster a name here, for example "Local regulars",
-"Club-only shippers", "Lapsed", "Collectors":
+After reading the profiles, give each cluster a name here, for example
+"Local regulars", "Club-only shippers", "Lapsed", "Collectors":
 
 ```{r}
 #| label: names
 cluster_names <- c(
-  "1" = "Cluster 1",
-  "2" = "Cluster 2",
-  "3" = "Cluster 3",
-  "4" = "Cluster 4",
-  "5" = "Cluster 5",
-  "6" = "Cluster 6",
-  "7" = "Cluster 7",
-  "8" = "Cluster 8"
+  "1" = "Estate Regulars",
+  "2" = "New Members",
+  "3" = "Remote Collectors",
+  "4" = "Lapsing Members"
 )[seq_len(k_final)]
 
 feat <- mutate(feat, segment = cluster_names[as.character(cluster)])
@@ -392,3 +403,33 @@ member_segments <- feat |>
 saveRDS(member_segments, here("member_segments.rds"))
 readr::write_csv(member_segments, here("member_segments.csv"))
 ```
+
+**1. Estate Regulars** (1,054 members, 30% of spend)\
+
+They order most often (4.5 orders a year), come to events most (the
+highest score on the heatmap, +1.7), pick up 86% of their orders at the
+winery, and visit the tasting room regularly. Most live in California
+but only 14% in SLO County, so these are people who make the trip, not
+locals. They're the most engaged and likely your best referral source.
+
+**2. New Members** (1,835 members, 9% of spend)\
+
+They have the shortest tenure (1.5 years), buy half as many bottles, and
+try the fewest wines. They still visit the tasting room about once a
+year and pay the highest price per bottle. They're still figuring out
+what they like, which makes them the group most worth onboarding.
+
+**3. Remote Collectors** (1,502 members, 42% of spend)\
+
+The biggest share of revenue: 20 bottles a year and the widest range of
+wines tried, but they rarely visit, pick up only 20% of orders, and
+order online most. Fewer than half live in California. They're loyal
+from a distance, so shipping experience and online access matter most to
+them.
+
+**4. Lapsing Members** (2,094 members, 20% of spend)\
+
+Their median time since last order is 444 days, versus 84–91 days for
+the other three groups. They order the least, and half their orders are
+just the automatic club shipment. This is the at-risk group, and
+probably where most cancellations come from.
