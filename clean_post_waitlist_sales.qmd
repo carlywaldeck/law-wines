@@ -60,7 +60,7 @@ text. Types are parsed explicitly below.
 
 ```{r}
 #| label: read
-paths <- list.files(here("raw-data"), pattern = "^Sales Post Waitlist.*\\.csv$", full.names = TRUE)
+paths <- list.files(here(), pattern = "^Sales Post Waitlist.*\\.csv$", full.names = TRUE)
 stopifnot(length(paths) >= 1)
 basename(paths)
 
